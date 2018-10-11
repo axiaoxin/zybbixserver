@@ -1,0 +1,8 @@
+{
+    "bind": ":20051",
+    "report_to": "127.0.0.1:6621",
+    "data_path": ".",
+    "log_level": "debug",
+    "log_formatter": "text",
+    "debug": false
+}
