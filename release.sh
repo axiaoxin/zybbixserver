@@ -1,5 +1,6 @@
 #! /usr/bin/env bash
+rm -rf ./zybbixserver
 mkdir ./zybbixserver
 go build -o ./zybbixserver/zybbixserver
-cp zybbixserver.json supervisor.conf monitems.json ./zybbixserver
+cp README.md zybbixserver.json supervisor.conf ./zybbixserver
 tar czf zybbixserver.tar.gz ./zybbixserver && rm -rf ./zybbixserver

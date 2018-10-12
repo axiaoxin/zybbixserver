@@ -3,21 +3,20 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"git.code.oa.com/u/ashinchen/zybbixserver/lib"
+	"github.com/fsnotify/fsnotify"
 	"github.com/json-iterator/go"
 	log "github.com/sirupsen/logrus"
+	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
-const VERSION = "1.0"
+const VERSION = "1.1"
 
 type CollectorMetric [2]int
 
@@ -29,12 +28,11 @@ type CollectorPacket struct {
 }
 
 type MonitorItem struct {
-	ZabbixKey   string
-	AttrID      int
-	Delay       int
-	LastLogSize int
-	MTime       int
-	Base        float64
+	AttrID      int     `json:"attr_id"`
+	Delay       int     `json:"delay"`
+	LastLogSize int     `json:"lastlogsize"`
+	MTime       int     `json:"mtime"`
+	Base        float64 `json:"base"`
 }
 
 type ReportResult struct {
@@ -45,12 +43,60 @@ type ReportResult struct {
 }
 
 var ZBXHEADER = []byte("ZBXD\x01")
-var ZabbixKeyMonitorItemMap = loadZabbixKeyMonitorItemMap()
+var ZabbixKeyMonitorItemMap = map[string]MonitorItem{}
 
 func init() {
+	initConfig()
+	lib.InitLog()
+	initZabbixKeyMonitorItemMap()
+}
+
+func initConfig() {
+	default_bind := ":20051"
+	default_report_to := "127.0.0.1:6621"
+	default_log_level := "info"
+	default_log_formatter := "text"
+	default_debug := false
+	default_monitems := `{"system.cpu.util[,user]":{"attr_id":9,"delay":60,"base":1}}`
+
+	// 默认参数
+	viper.SetDefault("bind", default_bind)
+	viper.SetDefault("report_to", default_report_to)
+	viper.SetDefault("log_level", default_log_level)
+	viper.SetDefault("log_formatter", default_log_formatter)
+	viper.SetDefault("debug", default_debug)
+	viper.SetDefault("monitems", default_monitems)
+
+	// 读取配置文件
+	viper.SetConfigName("zybbixserver")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("$HOME/")
+	viper.AddConfigPath("/etc/zybbixserver")
+	err := viper.ReadInConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 解析环境变量
+	viper.SetEnvPrefix("ZYBBIX")
+	viper.BindEnv("bind")
+	viper.BindEnv("report_to")
+	viper.BindEnv("log_level")
+	viper.BindEnv("log_formatter")
+	viper.BindEnv("debug")
+	viper.BindEnv("monitems")
+
+	// 解析命令行参数
 	version := flag.Bool("version", false, "show version")
 	check := flag.Bool("check", false, "check everything need to be checked")
+	flag.String("bind", default_bind, "ZybbixServer运行地址(:PORT)")
+	flag.String("report_to", default_report_to, "接收到的监控数据上报地址(IP:PORT)")
+	flag.String("log_level", default_log_level, "ZybbixServer日志打印级别(debug|info|warning|error|fatal|panic)")
+	flag.String("log_formatter", default_log_formatter, "ZybbixServer日志格式(json|text)")
+	flag.Bool("debug", default_debug, "ZybbixServer debug模式(true|false)")
+	flag.String("monitems", default_monitems, "ZybbixServer 监控项JSON数组配置")
 	flag.Parse()
+	viper.BindPFlags(flag.CommandLine)
 	if *version {
 		fmt.Println("zybbixserver", VERSION)
 		os.Exit(0)
@@ -59,8 +105,25 @@ func init() {
 		fmt.Println("zybbixserver is ok")
 		os.Exit(0)
 	}
-	lib.InitConfig()
-	lib.InitLog()
+
+	viper.WatchConfig()
+	viper.OnConfigChange(func(e fsnotify.Event) {
+		lib.InitLog()
+		initZabbixKeyMonitorItemMap()
+	})
+}
+
+func initZabbixKeyMonitorItemMap() {
+	// 从JSON文件加载数据
+	monitems := viper.GetStringMap("monitems")
+	for zabbixKey, i := range monitems {
+		ZabbixKeyMonitorItemMap[zabbixKey] = MonitorItem{
+			AttrID: int(i.(map[string]interface{})["attr_id"].(float64)),
+			Delay:  int(i.(map[string]interface{})["delay"].(float64)),
+			Base:   i.(map[string]interface{})["base"].(float64),
+		}
+	}
+	log.Debug("init ZabbixKeyMonitorItemMap: ", ZabbixKeyMonitorItemMap)
 }
 
 func main() {
@@ -123,37 +186,14 @@ func handleClient(conn net.Conn) {
 	conn.Write(result)
 }
 
-func loadZabbixKeyMonitorItemMap() map[string]MonitorItem {
-	// 从JSON文件加载数据
-	json, err := ioutil.ReadFile(filepath.Join(viper.GetString("data_path"), "monitems.json"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	items := jsoniter.Get(json)
-	zkmiMap := map[string]MonitorItem{}
-	for index := 0; index < items.Size(); index++ {
-		item := items.Get(index)
-		mItem := MonitorItem{
-			ZabbixKey:   item.Get("zabbix_key").ToString(),
-			AttrID:      item.Get("attr_id").ToInt(),
-			Delay:       item.Get("delay").ToInt(),
-			LastLogSize: item.Get("lastlogsize").ToInt(),
-			MTime:       item.Get("mtime").ToInt(),
-			Base:        item.Get("base").ToFloat64(),
-		}
-		zkmiMap[mItem.ZabbixKey] = mItem
-	}
-	return zkmiMap
-}
-
 func handleActiveChecks() []byte {
 	response := map[string]interface{}{
 		"response": "success",
 		"data":     []map[string]interface{}{},
 	}
-	for _, item := range ZabbixKeyMonitorItemMap {
+	for zabbixKey, item := range ZabbixKeyMonitorItemMap {
 		d := map[string]interface{}{
-			"key":         item.ZabbixKey,
+			"key":         zabbixKey,
 			"delay":       item.Delay,
 			"lastlogsize": item.LastLogSize,
 			"mtime":       item.MTime,
