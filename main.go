@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"git.code.oa.com/u/ashinchen/zybbixserver/lib"
@@ -208,7 +209,7 @@ func handleActiveChecks() []byte {
 }
 
 func reportToCollector(data jsoniter.Any) ReportResult {
-	start := float64(time.Now().UnixNano()) / 1e6
+	start := time.Now()
 	metrics := []CollectorMetric{}
 	total := data.Size()
 	processed, failed := total, 0
@@ -241,8 +242,10 @@ func reportToCollector(data jsoniter.Any) ReportResult {
 		result.Processed = 0
 		result.Failed = total
 	}
-	result.SecondsSpent = float64(time.Now().UnixNano())/1e6 - start
+	log.Debug("report response:", res)
+	result.SecondsSpent, _ = strconv.ParseFloat(fmt.Sprintf("%f", time.Since(start).Seconds()), 64)
 	return result
+
 }
 
 func handleMonitorData(data jsoniter.Any) []byte {
